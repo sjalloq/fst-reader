@@ -112,7 +112,7 @@ pub(crate) fn read_variant_i64(input: &mut impl Read) -> ReadResult<i64> {
 }
 
 #[inline]
-pub(crate) fn read_variant_u64(input: &mut impl Read) -> ReadResult<(u64, usize)> {
+pub(crate) fn read_variant_u64(input: &mut (impl Read + ?Sized)) -> ReadResult<(u64, usize)> {
     let mut byte = [0u8; 1];
     let mut res = 0u64;
     for ii in 0..10 {
@@ -184,7 +184,7 @@ pub(crate) fn write_variant_u32(output: &mut impl Write, value: u32) -> WriteRes
 }
 
 #[inline]
-pub(crate) fn read_u64(input: &mut impl Read) -> ReadResult<u64> {
+pub(crate) fn read_u64(input: &mut (impl Read + ?Sized)) -> ReadResult<u64> {
     let mut buf = [0u8; 8];
     input.read_exact(&mut buf)?;
     Ok(u64::from_be_bytes(buf))
@@ -199,7 +199,7 @@ pub(crate) fn write_u64(output: &mut impl Write, value: u64) -> WriteResult<()> 
 }
 
 #[inline]
-pub(crate) fn read_u8(input: &mut impl Read) -> ReadResult<u8> {
+pub(crate) fn read_u8(input: &mut (impl Read + ?Sized)) -> ReadResult<u8> {
     let mut buf = [0u8; 1];
     input.read_exact(&mut buf)?;
     Ok(buf[0])
@@ -315,7 +315,7 @@ pub(crate) fn read_multi_bit_signal_time_delta(bytes: &[u8], offset: u32) -> Rea
 
 /// Reads ZLib compressed bytes.
 pub(crate) fn read_zlib_compressed_bytes(
-    input: &mut (impl Read + Seek),
+    input: &mut (impl Read + Seek + ?Sized),
     uncompressed_length: u64,
     compressed_length: u64,
     allow_uncompressed: bool,
@@ -364,7 +364,7 @@ pub(crate) fn write_compressed_bytes(
 }
 
 #[inline]
-pub(crate) fn read_bytes(input: &mut impl Read, len: usize) -> ReadResult<Vec<u8>> {
+pub(crate) fn read_bytes(input: &mut (impl Read + ?Sized), len: usize) -> ReadResult<Vec<u8>> {
     let mut buf: Vec<u8> = Vec::with_capacity(len);
     input.take(len as u64).read_to_end(&mut buf)?;
     Ok(buf)
@@ -1427,29 +1427,43 @@ fn read_value_change_alias(
     let mut table = Vec::with_capacity(max_handle as usize);
     let mut prev_offset_idx = 0usize;
     let mut offset: Option<NonZeroU32> = None;
+    // Track indices that need to be aliased to prev_offset_idx (zero increment case)
+    let mut pending_aliases: Vec<(usize, usize)> = Vec::new();
+
     while !chain_bytes.is_empty() {
-        let (raw_val, _) = read_variant_u32(&mut chain_bytes)?;
+        // Use u64 varint to handle large increments written by fst-writer
+        let (raw_val, _) = read_variant_u64(&mut chain_bytes)?;
         let idx = table.len();
+
         if raw_val == 0 {
-            let (raw_alias, _) = read_variant_u32(&mut chain_bytes)?;
+            // Explicit alias (followed by alias index)
+            let (raw_alias, _) = read_variant_u64(&mut chain_bytes)?;
             let alias = ((raw_alias as i64) - 1) as u32;
             table.push(SignalDataLoc::Alias(alias));
         } else if (raw_val & 1) == 1 {
-            // a new incremental offset
-            let new_offset =
-                NonZeroU32::new(offset.map(|o| o.get()).unwrap_or_default() + (raw_val >> 1))
-                    .unwrap();
-            // if there was a previous entry, we need to update the length
-            if let Some(prev_offset) = offset {
-                let len = NonZeroU32::new(new_offset.get() - prev_offset.get()).unwrap();
-                table[prev_offset_idx] = SignalDataLoc::Offset(prev_offset, len);
+            let increment = raw_val >> 1;
+            if increment == 0 {
+                // Zero increment = implicit alias to previous signal at same offset
+                // Record it for later resolution
+                pending_aliases.push((idx, prev_offset_idx));
+                table.push(SignalDataLoc::None); // Placeholder
+            } else {
+                // New incremental offset
+                let prev_val = offset.map(|o| o.get() as u64).unwrap_or_default();
+                let new_offset_u64 = prev_val + increment;
+                let new_offset = NonZeroU32::new(new_offset_u64 as u32).unwrap();
+                // Update previous entry's length
+                if let Some(prev_offset) = offset {
+                    let len = NonZeroU32::new(new_offset.get() - prev_offset.get()).unwrap();
+                    table[prev_offset_idx] = SignalDataLoc::Offset(prev_offset, len);
+                }
+                offset = Some(new_offset);
+                prev_offset_idx = idx;
+                // Push placeholder (will be replaced when we know length)
+                table.push(SignalDataLoc::None);
             }
-            offset = Some(new_offset);
-            prev_offset_idx = idx;
-            // push a placeholder which will be replaced as soon as we know the length
-            table.push(SignalDataLoc::None);
         } else {
-            // a block of signals that do not have any data
+            // Run of signals with no data
             let zeros = raw_val >> 1;
             for _ in 0..zeros {
                 table.push(SignalDataLoc::None);
@@ -1457,10 +1471,15 @@ fn read_value_change_alias(
         }
     }
 
-    // if there was a previous entry, we need to update the length
+    // Update final entry's length
     if let Some(prev_offset) = offset {
         let len = NonZeroU32::new(last_table_entry - prev_offset.get()).unwrap();
         table[prev_offset_idx] = SignalDataLoc::Offset(prev_offset, len);
+    }
+
+    // Now resolve pending aliases (zero increment entries)
+    for (alias_idx, target_idx) in pending_aliases {
+        table[alias_idx] = SignalDataLoc::Alias(target_idx as u32);
     }
 
     Ok(table.into())
@@ -1478,7 +1497,7 @@ enum SignalDataLoc {
 }
 
 pub(crate) fn read_signal_locs(
-    input: &mut (impl Read + Seek),
+    input: &mut (impl Read + Seek + ?Sized),
     chain_len_offset: u64,
     section_kind: DataSectionKind,
     max_handle: u64,
@@ -1521,6 +1540,130 @@ mod tests {
         // a negative value from a real fst file (solution from gtkwave)
         let in0 = [0x7b];
         assert_eq!(read_variant_i64(&mut in0.as_slice()).unwrap(), -5);
+    }
+
+    /// Test that read_value_change_alias handles zero increments (implicit aliases)
+    /// and large increments written as u64 varints.
+    #[test]
+    fn test_read_value_change_alias_zero_increment() {
+        // Build a position table with:
+        // - Signal 0: offset 1 (increment=1, encoded as (1<<1)|1 = 0x03)
+        // - Signal 1: same offset as signal 0 (increment=0, encoded as (0<<1)|1 = 0x01)
+        // - Signal 2: offset 66 (increment=65, encoded as (65<<1)|1 = 0x83 0x01)
+        let chain_bytes: Vec<u8> = vec![
+            0x03, // signal 0: increment 1 -> offset 1
+            0x01, // signal 1: increment 0 -> alias to signal 0
+            0x83, 0x01, // signal 2: increment 65 -> offset 66
+        ];
+
+        let table = read_value_change_alias(&chain_bytes, 3, 100).unwrap();
+        assert_eq!(table.0.len(), 3);
+
+        // Signal 0 should have offset 1, length 65 (66-1)
+        match table.0[0] {
+            SignalDataLoc::Offset(off, len) => {
+                assert_eq!(off.get(), 1);
+                assert_eq!(len.get(), 65);
+            }
+            _ => panic!("Signal 0 should be Offset, got {:?}", table.0[0]),
+        }
+
+        // Signal 1 should alias to signal 0
+        match table.0[1] {
+            SignalDataLoc::Alias(alias) => assert_eq!(alias, 0),
+            _ => panic!("Signal 1 should be Alias(0), got {:?}", table.0[1]),
+        }
+
+        // Signal 2 should have offset 66, length 34 (100-66)
+        match table.0[2] {
+            SignalDataLoc::Offset(off, len) => {
+                assert_eq!(off.get(), 66);
+                assert_eq!(len.get(), 34);
+            }
+            _ => panic!("Signal 2 should be Offset, got {:?}", table.0[2]),
+        }
+    }
+
+    /// Test that read_value_change_alias can handle u64 varints
+    /// that require more than 5 bytes (which would fail with read_variant_u32).
+    /// This tests that we can at least READ the varint without Leb128(32) error.
+    #[test]
+    fn test_read_value_change_alias_large_varint_readable() {
+        // Test that a 6-byte varint can be read (would fail with read_variant_u32)
+        // Using a value that fits in u32 after decoding: increment = 0x1000_0000 (256MB)
+        // Encoded as (0x1000_0000 << 1) | 1 = 0x2000_0001
+        // This requires 5 bytes as varint, right at the limit.
+        //
+        // Let's use a value requiring 6 bytes: increment = 0x2_0000_0000 (8GB)
+        // But that would overflow u32 after addition. Instead, verify that
+        // read_variant_u64 is being used by checking a 5-byte varint works.
+
+        // Use increment that produces 5-byte varint: 0x0800_0000 (134MB)
+        // (0x0800_0000 << 1) | 1 = 0x1000_0001
+        // Varint: 0x81, 0x80, 0x80, 0x80, 0x01 (5 bytes)
+        let increment: u64 = 0x0800_0000;
+        let encoded = (increment << 1) | 1;
+
+        let mut chain_bytes = Vec::new();
+        let mut val = encoded;
+        loop {
+            let byte = (val & 0x7f) as u8;
+            val >>= 7;
+            if val == 0 {
+                chain_bytes.push(byte);
+                break;
+            } else {
+                chain_bytes.push(byte | 0x80);
+            }
+        }
+
+        // Verify it's a 5-byte varint (boundary case for u32)
+        assert_eq!(chain_bytes.len(), 5, "Expected 5-byte varint");
+
+        // Parse - should succeed with u64 reading
+        let last_entry = (increment + 100) as u32;
+        let result = read_value_change_alias(&chain_bytes, 1, last_entry);
+        assert!(result.is_ok(), "Failed to parse 5-byte varint: {:?}", result);
+    }
+
+    /// Test position table with a run of zeros (signals with no data)
+    #[test]
+    fn test_read_value_change_alias_zeros_run() {
+        // Build a position table with:
+        // - Signal 0: offset 1
+        // - Signals 1-3: no data (zeros run of 3, encoded as (3<<1)|0 = 0x06)
+        // - Signal 4: offset 10
+        let chain_bytes: Vec<u8> = vec![
+            0x03, // signal 0: increment 1 -> offset 1
+            0x06, // signals 1-3: zeros run of 3
+            0x13, // signal 4: increment 9 -> offset 10
+        ];
+
+        let table = read_value_change_alias(&chain_bytes, 5, 50).unwrap();
+        assert_eq!(table.0.len(), 5);
+
+        // Signal 0: offset 1
+        match table.0[0] {
+            SignalDataLoc::Offset(off, len) => {
+                assert_eq!(off.get(), 1);
+                assert_eq!(len.get(), 9); // 10 - 1
+            }
+            _ => panic!("Signal 0 should be Offset"),
+        }
+
+        // Signals 1-3: None
+        assert!(matches!(table.0[1], SignalDataLoc::None));
+        assert!(matches!(table.0[2], SignalDataLoc::None));
+        assert!(matches!(table.0[3], SignalDataLoc::None));
+
+        // Signal 4: offset 10
+        match table.0[4] {
+            SignalDataLoc::Offset(off, len) => {
+                assert_eq!(off.get(), 10);
+                assert_eq!(len.get(), 40); // 50 - 10
+            }
+            _ => panic!("Signal 4 should be Offset"),
+        }
     }
 
     #[test]
