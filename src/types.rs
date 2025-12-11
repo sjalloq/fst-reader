@@ -16,7 +16,7 @@ use std::num::NonZeroU32;
 pub(crate) const HIERARCHY_NAME_MAX_SIZE: usize = 65536;
 pub(crate) const HIERARCHY_ATTRIBUTE_MAX_SIZE: usize = 65536 + 4096;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 #[cfg_attr(test, derive(Arbitrary))]
 pub struct FstSignalHandle(NonZeroU32);
 
@@ -302,7 +302,7 @@ pub(crate) struct DataSectionInfo {
     pub(crate) mem_required_for_traversal: u64,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 #[cfg_attr(test, derive(Arbitrary))]
 pub enum FstHierarchyEntry {
     Scope {

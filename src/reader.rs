@@ -10,6 +10,10 @@ use std::io::{BufRead, Read, Seek, SeekFrom, Write};
 trait BufReadSeek: BufRead + Seek {}
 impl<T> BufReadSeek for T where T: BufRead + Seek {}
 
+/// Trait for types that implement both BufRead and Seek, usable as trait objects.
+pub(crate) trait BufReadSeekAny: BufRead + Seek {}
+impl<T: BufRead + Seek> BufReadSeekAny for T {}
+
 /// Reads in a FST file.
 pub struct FstReader<R: BufRead + Seek> {
     input: InputVariant<R>,
@@ -207,6 +211,40 @@ impl<R: BufRead + Seek> FstReader<R> {
         match &self.meta.time_table {
             Some(table) => Some(table),
             None => None,
+        }
+    }
+
+    /// Get access to the data section information (for raw/low-level access).
+    pub(crate) fn get_data_sections(&self) -> &[DataSectionInfo] {
+        &self.meta.data_sections
+    }
+
+    /// Get the number of unique signals (max handle).
+    pub fn signal_count(&self) -> usize {
+        self.meta.signals.len()
+    }
+
+    /// Get signal geometry (frame byte length and whether it's a real) for all signals.
+    /// Returns (frame_bytes, is_real) for each signal.
+    pub fn signal_geometries(&self) -> Vec<(u32, bool)> {
+        self.meta
+            .signals
+            .iter()
+            .map(|s| (s.len(), s.is_real()))
+            .collect()
+    }
+
+    /// Execute a function with mutable access to the underlying reader.
+    /// This is used for raw VC block access.
+    pub(crate) fn with_input_mut<T, F>(&mut self, f: F) -> T
+    where
+        F: FnOnce(&mut dyn BufReadSeekAny) -> T,
+    {
+        match &mut self.input {
+            InputVariant::Original(input) => f(input),
+            InputVariant::Incomplete(input, _) => f(input),
+            InputVariant::UncompressedInMem(input) => f(input),
+            InputVariant::IncompleteUncompressedInMem(input, _) => f(input),
         }
     }
 

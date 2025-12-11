@@ -15,12 +15,22 @@ lz4_flex = "0.12.0"
 num_enum = "0.7"
 thiserror = "2.0"
 miniz_oxide = { version = "0.8.9", features = ["std"] }
+fst-writer = { git = "https://github.com/sjalloq/fst-writer", branch = "fst-filter" }
 
 [dev-dependencies]
 fst-sys = "0.2.0"
 leb128 = "0.2.5"
 proptest = "1.9"
 proptest-derive = "0.7"
+clap = { version = "4", features = ["derive"] }
+regex = "1"
+glob = "0.3"
+rustc-hash = "2.1"
+tempfile = "3"
 
 [profile.release]
+opt-level = 3
 debug = true
+lto = "thin"
+codegen-units = 1
+debug-assertions = false
