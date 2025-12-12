@@ -193,8 +193,7 @@ impl<'a> VcBlockReader<'a> {
         out: &mut W,
     ) -> Result<u32> {
         let waves_start = self.waves_data_start.ok_or_else(|| {
-            ReaderError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            ReaderError::Io(std::io::Error::other(
                 "must call read_position_table before copy_signal_data",
             ))
         })?;
@@ -214,8 +213,7 @@ impl<'a> VcBlockReader<'a> {
     /// Must call read_position_table first.
     pub fn read_signal_data_raw(&mut self, loc: &SignalDataLocation) -> Result<Vec<u8>> {
         let waves_start = self.waves_data_start.ok_or_else(|| {
-            ReaderError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            ReaderError::Io(std::io::Error::other(
                 "must call read_position_table before read_signal_data_raw",
             ))
         })?;
