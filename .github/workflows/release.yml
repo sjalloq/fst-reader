@@ -1,0 +1,165 @@
+name: Release fst-filter
+
+on:
+  push:
+    tags:
+      - 'fst-filter-v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g., fst-filter-v0.1.0)'
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+  BINARY_NAME: fst-filter
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            cross: false
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            cross: false
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            cross: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build (cross)
+        if: matrix.cross
+        run: cross build --release --example fst-filter --target ${{ matrix.target }}
+
+      - name: Build (native)
+        if: "!matrix.cross"
+        run: cargo build --release --example fst-filter --target ${{ matrix.target }}
+
+      - name: Prepare artifact (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/examples/fst-filter dist/
+          cd dist
+          tar -czvf fst-filter-${{ matrix.target }}.tar.gz fst-filter
+          rm fst-filter
+
+      - name: Prepare artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item "target/${{ matrix.target }}/release/examples/fst-filter.exe" -Destination dist/
+          Compress-Archive -Path dist/fst-filter.exe -DestinationPath dist/fst-filter-${{ matrix.target }}.zip
+          Remove-Item dist/fst-filter.exe
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fst-filter-${{ matrix.target }}
+          path: dist/*
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec mv {} release/ \;
+          ls -la release/
+
+      - name: Get version from tag
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${{ github.ref_name }}"
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          VERSION="${TAG#fst-filter-}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: fst-filter ${{ steps.version.outputs.version }}
+          body: |
+            ## fst-filter ${{ steps.version.outputs.version }}
+
+            FST waveform file inspection and filtering tool.
+
+            ### Installation
+
+            Download the appropriate binary for your platform and extract it.
+
+            #### Linux (x86_64)
+            ```bash
+            tar -xzf fst-filter-x86_64-unknown-linux-musl.tar.gz
+            chmod +x fst-filter
+            ./fst-filter --help
+            ```
+
+            #### macOS
+            ```bash
+            tar -xzf fst-filter-x86_64-apple-darwin.tar.gz  # Intel
+            # or
+            tar -xzf fst-filter-aarch64-apple-darwin.tar.gz  # Apple Silicon
+            chmod +x fst-filter
+            ./fst-filter --help
+            ```
+
+            #### Windows
+            Extract `fst-filter-x86_64-pc-windows-msvc.zip` and run `fst-filter.exe`.
+
+            ### Usage
+
+            ```bash
+            # Display file info
+            fst-filter input.fst --info
+
+            # List hierarchy
+            fst-filter input.fst --hierarchy --max-depth 3
+
+            # Filter signals by path
+            fst-filter input.fst -o output.fst "top.cpu.*"
+            ```
+          files: release/*
+          draft: false
+          prerelease: false
