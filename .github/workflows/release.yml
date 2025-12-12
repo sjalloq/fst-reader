@@ -34,9 +34,6 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             cross: false
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            cross: false
 
     steps:
       - uses: actions/checkout@v4
@@ -58,23 +55,13 @@ jobs:
         if: "!matrix.cross"
         run: cargo build --release --example fst-filter --target ${{ matrix.target }}
 
-      - name: Prepare artifact (Unix)
-        if: runner.os != 'Windows'
+      - name: Prepare artifact
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/examples/fst-filter dist/
           cd dist
           tar -czvf fst-filter-${{ matrix.target }}.tar.gz fst-filter
           rm fst-filter
-
-      - name: Prepare artifact (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path dist
-          Copy-Item "target/${{ matrix.target }}/release/examples/fst-filter.exe" -Destination dist/
-          Compress-Archive -Path dist/fst-filter.exe -DestinationPath dist/fst-filter-${{ matrix.target }}.zip
-          Remove-Item dist/fst-filter.exe
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -100,7 +87,7 @@ jobs:
       - name: Prepare release files
         run: |
           mkdir -p release
-          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec mv {} release/ \;
+          find artifacts -type f -name "*.tar.gz" -exec mv {} release/ \;
           ls -la release/
 
       - name: Get version from tag
@@ -144,9 +131,6 @@ jobs:
             chmod +x fst-filter
             ./fst-filter --help
             ```
-
-            #### Windows
-            Extract `fst-filter-x86_64-pc-windows-msvc.zip` and run `fst-filter.exe`.
 
             ### Usage
 
